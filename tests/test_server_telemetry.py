@@ -8,7 +8,7 @@ import tnkr_server
 from conftest import write_walk_script
 
 
-from fakes import FakeHWI as _SharedFakeHWI
+from fakes import FakeHWI as _SharedFakeHWI, FakeStateImu
 
 
 class FakeHWI(_SharedFakeHWI):
@@ -156,7 +156,8 @@ def test_a_polled_read_that_RETURNS_an_error_is_captured(client, captured):
     assert captured[0]["properties"]["status_code"] == 503
 
 
-def test_unmatched_api_404s_are_not_captured(client, captured):
+def test_unmatched_api_404s_are_not_captured(client, captured, monkeypatch, tmp_path):
+    monkeypatch.setattr(tnkr_server, "CONFIG_PATH", str(tmp_path / "missing-config.json"))
     # LAN port-scanner noise: /api/* paths that match no route must not
     # generate events (quota protection).
     for _ in range(3):
@@ -229,11 +230,7 @@ def test_add_telemetry_props_noop_outside_request():
 # ── IMU worker outcome events ────────────────────────────────────────────────
 
 def _stub_state_imu(monkeypatch, fake_imu):
-    # The worker reads the chip through the state IMU's shared handle (a second
-    # BNO055_I2C would soft-reset the chip and wipe the axis remap).
-    monkeypatch.setattr(
-        tnkr_server, "get_state_imu", lambda: types.SimpleNamespace(imu=fake_imu)
-    )
+    monkeypatch.setattr(tnkr_server, "get_state_imu", lambda: fake_imu)
 
 
 def test_imu_worker_failure_event(captured, monkeypatch):
@@ -252,46 +249,31 @@ def test_imu_worker_failure_event(captured, monkeypatch):
 
 
 def test_imu_worker_completed_event(captured, monkeypatch, tmp_path):
-    class FakeIMU:
-        mode = None
-        calibration_status = (3, 3, 3, 3)
-        calibrated = True
-        offsets_accelerometer = (0, 0, 0)
-        offsets_gyroscope = (0, 0, 0)
-        offsets_magnetometer = (0, 0, 0)
-
-    _stub_state_imu(monkeypatch, FakeIMU())
+    fake = FakeStateImu()
+    _stub_state_imu(monkeypatch, fake)
     monkeypatch.setattr(tnkr_server, "SCRIPTS_DIR", tmp_path)
     status = {"running": True, "calibration_status": [0, 0, 0, 0],
               "calibrated": False, "error": None, "offsets": None}
     tnkr_server._imu_calibrate_worker(status)
-    assert (tmp_path / "imu_calib_data.pkl").exists()
+    assert fake.calibration_saved
+    assert not (tmp_path / "imu_calib_data.pkl").exists()
     assert len(events_named(captured, "imu_calibration_completed")) == 1
 
 
 def test_imu_worker_stopped_event(captured, monkeypatch):
-    class FakeIMU:
-        mode = None
-        calibration_status = (1, 2, 0, 3)
-        calibrated = False
-        # never calibrates; loop exits when status["running"] flips
-
-    fake = FakeIMU()
+    fake = FakeStateImu()
     _stub_state_imu(monkeypatch, fake)
-    status = {"running": True, "calibration_status": [0, 0, 0, 0],
+    status = {"running": True, "calibration_status": [None, None, None, 0],
               "calibrated": False, "error": None, "offsets": None}
 
-    # Flip running to False after the first poll, as /stop would.
-    class StopAfterFirstPoll:
-        def __get__(self, obj, objtype=None):
-            status["running"] = False
-            return (1, 2, 0, 3)
-
-    type(fake).calibration_status = StopAfterFirstPoll()
+    def stop_after_first_poll():
+        status["running"] = False
+        return 2
+    fake.calibration_status = stop_after_first_poll
     tnkr_server._imu_calibrate_worker(status)
     stopped = events_named(captured, "imu_calibration_stopped")
     assert len(stopped) == 1
-    assert stopped[0]["properties"]["calibration_status"] == [1, 2, 0, 3]
+    assert stopped[0]["properties"]["calibration_status"] == [None, None, None, 2]
 
 
 def test_imu_stop_then_restart_does_not_double_report(captured, monkeypatch):

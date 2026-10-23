@@ -784,7 +784,7 @@ do_pip_core() {
         pip_install --no-cache-dir --prefer-binary \
             "numpy>=1.26.4" \
             "onnxruntime>=1.18.1" \
-            "adafruit-circuitpython-bno055>=5.4.13" \
+            "adafruit-circuitpython-bno08x>=1.2.0" \
             "lgpio>=0.2.2.0" \
             "supabase>=2.0.0" \
             "websockets>=12.0" \

@@ -1,0 +1,162 @@
+{
+  "policy": "policy.onnx  obs float32[1,101] -> action float32[1,14] (tanh, |a|<=1)",
+  "actuator_names": [
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "neck_pitch",
+    "head_pitch",
+    "head_yaw",
+    "head_roll",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle"
+  ],
+  "default_pose": [
+    0.002,
+    0.053,
+    -0.63,
+    1.368,
+    -0.784,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.003,
+    -0.065,
+    0.635,
+    1.379,
+    -0.796
+  ],
+  "action_scale": 0.5,
+  "motor_target": "default_pose + action_scale*action, then rate-limited",
+  "max_motor_velocity_rad_s": 5.24,
+  "control_hz": 50,
+  "phase": {
+    "nb_steps_in_period": 27,
+    "imitation_phase": "[cos(2*pi*i/N), sin(2*pi*i/N)], i += 1 per tick, i %= N"
+  },
+  "commands_7": [
+    "lin_vel_x [-0.15,0.15]",
+    "lin_vel_y [-0.2,0.2]",
+    "ang_vel_yaw [-1,1]",
+    "neck_pitch",
+    "head_pitch",
+    "head_yaw",
+    "head_roll"
+  ],
+  "obs_101_layout": [
+    [
+      "gyro",
+      3
+    ],
+    [
+      "accelerometer (+1.3 on x, as mujoco_infer.py)",
+      3
+    ],
+    [
+      "commands",
+      7
+    ],
+    [
+      "joint_pos - default_pose",
+      14
+    ],
+    [
+      "joint_vel*0.05",
+      14
+    ],
+    [
+      "last_action",
+      14
+    ],
+    [
+      "last_last_action",
+      14
+    ],
+    [
+      "last_last_last_action",
+      14
+    ],
+    [
+      "motor_targets",
+      14
+    ],
+    [
+      "feet_contacts [left,right]",
+      2
+    ],
+    [
+      "imitation_phase",
+      2
+    ]
+  ],
+  "source_checkpoint": "checkpoints_orient/2026_10_20_081209_48660480",
+  "actuator_ctrlrange_rad": {
+    "left_hip_yaw": [
+      -0.470414,
+      0.505198
+    ],
+    "left_hip_roll": [
+      -0.535359,
+      0.520019
+    ],
+    "left_hip_pitch": [
+      -0.690291,
+      0.885107
+    ],
+    "left_knee": [
+      -1.51455,
+      1.975256
+    ],
+    "left_ankle": [
+      -1.122874,
+      0.928058
+    ],
+    "neck_pitch": [
+      -0.840621,
+      0.516952
+    ],
+    "head_pitch": [
+      -0.449456,
+      0.780796
+    ],
+    "head_yaw": [
+      -1.244058,
+      1.041573
+    ],
+    "head_roll": [
+      -0.76699,
+      0.791534
+    ],
+    "right_hip_yaw": [
+      -0.587515,
+      0.329806
+    ],
+    "right_hip_roll": [
+      -0.604388,
+      0.507748
+    ],
+    "right_hip_pitch": [
+      -0.924499,
+      0.624821
+    ],
+    "right_knee": [
+      -1.301314,
+      2.028959
+    ],
+    "right_ankle": [
+      -1.230253,
+      0.831418
+    ]
+  },
+  "actuator_ctrlrange_source": {
+    "model": "robo_duck.xml",
+    "sha256": "b07173f9eb5e1e36ca6d0b18bcaafdd0f8d09ca91231f50d5a8b70591eb1c04a",
+    "rule": "position inheritrange=1; clamp only actuator commands, preserve policy motor_targets observation"
+  }
+}

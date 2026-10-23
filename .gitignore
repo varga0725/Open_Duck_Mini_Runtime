@@ -8,3 +8,6 @@ dist
 .venv/
 # macOS Finder metadata
 .DS_Store
+
+# Robot-side bounded walk diagnostics
+diagnostics/walk/

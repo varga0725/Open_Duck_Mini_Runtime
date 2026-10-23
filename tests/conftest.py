@@ -56,6 +56,15 @@ class FakePosthogClient:
 
 
 @pytest.fixture(autouse=True)
+def isolate_imu_hardware(monkeypatch):
+    # Generic API tests must never open real hardware, even when run on the Pi.
+    monkeypatch.setitem(sys.modules, "board", None)
+    monkeypatch.setattr(tnkr_server, "state_imu", None)
+    yield
+    tnkr_server.release_state_imu()
+
+
+@pytest.fixture(autouse=True)
 def isolated_telemetry(tmp_path, monkeypatch):
     """Fresh telemetry state per test, and a hard guard against ever creating
     a real posthog client: _get_client only returns what a test installed."""

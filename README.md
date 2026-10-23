@@ -126,6 +126,13 @@ pip install lgpio
 
 ## Test the IMU
 
+This robot uses BNO08x over I2C (`0x4A` or `0x4B`). The driver emits gyro
+in rad/s, acceleration including gravity in m/s², and robot-frame quaternions
+in `(w, x, y, z)` order. The verified upright mounting is `(Y, -X, Z)`;
+`imu_upside_down` selects `(Y, X, -Z)` instead. Calibration is saved in the
+sensor; old BNO055 `imu_calib_data.pkl` files are ignored.
+
+
 ```bash
 python3 mini_bdx_runtime/mini_bdx_runtime/raw_imu.py
 ```

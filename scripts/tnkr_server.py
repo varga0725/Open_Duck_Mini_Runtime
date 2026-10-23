@@ -233,6 +233,7 @@ walk_session: WalkSession | None = None
 _walk_lock = Lock()
 last_walk_exit_code: int | None = None  # non-zero surfaces a crashed walk to clients
 rehome_io = None  # pypot FeetechSTS3215IO while a rehoming session is open
+_state_imu_lock = Lock()
 state_imu = None  # raw_imu.Imu singleton for idle /api/state reads (BNO055, I2C)
 last_state_joints: dict[str, float] = {}  # last-read pose, served while hardware is owned elsewhere
 
@@ -323,16 +324,17 @@ def get_state_imu():
     handle (see _imu_calibrate_worker) — constructing a second BNO055_I2C
     would soft-reset the chip and wipe the axis remap."""
     global state_imu
-    if state_imu is None:
-        from mini_bdx_runtime.raw_imu import Imu
+    with _state_imu_lock:
+        if state_imu is None:
+            from mini_bdx_runtime.raw_imu import Imu
 
-        upside_down = False
-        try:
-            upside_down = bool(_read_config().get("imu_upside_down", False))
-        except Exception:
-            pass
-        state_imu = Imu(sampling_freq=15, user_pitch_bias=0, upside_down=upside_down)
-    return state_imu
+            upside_down = False
+            try:
+                upside_down = bool(_read_config().get("imu_upside_down", False))
+            except Exception:
+                pass
+            state_imu = Imu(sampling_freq=15, user_pitch_bias=0, upside_down=upside_down)
+        return state_imu
 
 
 def release_state_imu():
@@ -2588,39 +2590,16 @@ def _imu_calibrate_worker(status: dict):
     """
     started = time.monotonic()
     try:
-        import pickle
-
-        # Reuse the state IMU's chip handle rather than opening a second one:
-        # adafruit_bno055's constructor soft-resets the BNO055 (SYS_TRIGGER
-        # 0x20, "reset to default settings"), which wipes the axis remap
-        # raw_imu.Imu applied for this robot's mounting. Every /api/state
-        # quaternion after that reset is in the chip's factory frame — the
-        # studio's 3D duck renders tipped over while the real duck stands
-        # upright. Sharing the handle keeps the remap (and the live
-        # orientation view) intact; the Imu constructor already put the chip
-        # in NDOF_MODE.
-        imu = get_state_imu().imu
-
-        # Poll until calibrated or stopped
+        imu = get_state_imu()
+        imu.begin_calibration()
         while status["running"]:
-            cal_status = imu.calibration_status  # (sys, gyro, accel, mag)
-            calibrated = imu.calibrated
-            status["calibration_status"] = list(cal_status)
-            status["calibrated"] = calibrated
-
-            if calibrated:
-                offsets = {
-                    "offsets_accelerometer": imu.offsets_accelerometer,
-                    "offsets_gyroscope": imu.offsets_gyroscope,
-                    "offsets_magnetometer": imu.offsets_magnetometer,
-                }
-                status["offsets"] = {
-                    k: list(v) for k, v in offsets.items()
-                }
-
-                # Save PKL to scripts dir so walk script can find it
-                pkl_path = str(SCRIPTS_DIR / "imu_calib_data.pkl")
-                pickle.dump(offsets, open(pkl_path, "wb"))
+            accuracy = imu.calibration_status()
+            status["calibration_status"] = [None, None, None, accuracy]
+            status["sensor"] = "bno08x"
+            if accuracy == 3 and status["running"]:
+                imu.save_calibration()
+                status["calibrated"] = True
+                status["offsets"] = {}
 
                 status["running"] = False
                 telemetry.capture(
@@ -2672,7 +2651,7 @@ def _probe_imu() -> None:
     the walk pre-flight in /api/walk/start.
     """
     try:
-        get_state_imu()
+        get_state_imu().get_data()
     except Exception as exc:
         # `imu_error_type`, not `error_type`: the exception handler stamps that one
         # with HTTPException on every coded refusal, and the class that named the
@@ -3041,6 +3020,45 @@ def _walk_preflight() -> PreflightReport:
         add_telemetry_props(preflight_ms=int((time.monotonic() - started) * 1000))
 
 
+def selected_walk_policy():
+    """Resolve the configured bundle, failing closed if an active bundle is broken."""
+    policies_dir = SCRIPTS_DIR.parent / "policies"
+    active = policies_dir / "active.json"
+    if active.is_file():
+        from mini_bdx_runtime.policy_settings import PolicySettings
+        try:
+            config = json.loads(active.read_text())
+            bundle = (policies_dir / config["bundle"]).resolve()
+            model = bundle / "policy.onnx"
+            settings_path = bundle / "runtime_settings.json"
+            settings = PolicySettings(settings_path)
+            if not model.is_file():
+                raise ValueError(f"Model does not exist: {model}")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(503, f"Invalid active policy bundle: {exc}") from exc
+        return model, settings_path, settings
+    models = sorted(SCRIPTS_DIR.glob("*.onnx"))
+    if not models:
+        raise HTTPException(404, "No ONNX model found in scripts/ directory")
+    return models[0].resolve(), None, None
+
+
+@app.get("/api/walk/policy")
+def configured_walk_policy():
+    """The policy configured for the next start; reads no robot hardware."""
+    import hashlib
+    model, settings_path, settings = selected_walk_policy()
+    return {
+        "model": str(model),
+        "sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+        "runtime_settings": str(settings_path) if settings_path else None,
+        "action_scale": settings.action_scale if settings else 0.25,
+        "control_hz": settings.control_hz if settings else 50,
+        "phase_period": settings.period if settings else None,
+        "actuator_limits_enabled": bool(settings and settings.actuator_ctrlrange is not None),
+    }
+
+
 def _walk_start_locked(body: WalkStartRequest):
     global walk_session
 
@@ -3073,6 +3091,10 @@ def _walk_start_locked(body: WalkStartRequest):
                 servos_responding=report.servos_responding, imu_present=report.imu_present
             )
 
+    is_pi = platform.machine() in ("aarch64", "armv7l")
+    if is_pi:
+        model_path, settings_path, policy_settings = selected_walk_policy()
+
     # Release HWI + BNO055 so the walk script owns both buses (serial + I2C);
     # /api/state serves the walk's telemetry snapshot while it runs.
     # Bus-only release: the servos keep holding their pose in firmware while
@@ -3095,14 +3117,7 @@ def _walk_start_locked(body: WalkStartRequest):
     walk_input = "pad" if body.input == "pad" else "keyboard"
 
     if is_pi:
-        # Find the ONNX model — look for any .onnx file in scripts/
-        onnx_files = list(SCRIPTS_DIR.glob("*.onnx"))
-        if not onnx_files:
-            raise HTTPException(
-                status_code=404,
-                detail="No ONNX model found in scripts/ directory",
-            )
-        onnx_path = str(onnx_files[0])
+        onnx_path = str(model_path)
         walk_script = str(SCRIPTS_DIR / "v2_rl_walk_mujoco.py")
         # Which device is driving. Absent until now, which meant the one
         # question worth asking about the controller -- did anyone ever manage
@@ -3125,7 +3140,16 @@ def _walk_start_locked(body: WalkStartRequest):
             walk_script,
             "--onnx_model_path", onnx_path,
             *walk_flags(walk_input),
+            "--diagnostics_path", str(SCRIPTS_DIR.parent / "diagnostics" / "walk" / "latest.npz"),
         ]
+        if settings_path:
+            cmd.extend(["--runtime_settings_path", str(settings_path)])
+        print(
+            f"[walk_start] policy={model_path} settings={settings_path} "
+            f"action_scale={policy_settings.action_scale if policy_settings else 0.25} "
+            f"actuator_limits={bool(policy_settings and policy_settings.actuator_ctrlrange is not None)}",
+            flush=True,
+        )
         if body.sessionToken:
             cmd.extend(["--cloud_channel", f"robot-telemetry-{body.sessionToken}"])
             cmd.extend(["--cloud_commands_channel", f"robot-commands-{body.sessionToken}"])
@@ -3165,7 +3189,8 @@ def _walk_start_locked(body: WalkStartRequest):
     # is_walking() goes true the moment we spawn, seconds before the walk
     # publishes its own state, so a leftover file would read as *this* walk's
     # pause/trim for the whole boot window.
-    walk_pause.clear()
+    start_paused = _start_paused_from_config()
+    walk_pause.write(bool(start_paused))
     walk_offsets.clear()
 
     proc = subprocess.Popen(cmd, cwd=str(SCRIPTS_DIR))
@@ -3176,7 +3201,7 @@ def _walk_start_locked(body: WalkStartRequest):
         started_at=time.monotonic(),
         walk_input=walk_input,
         remote="--remote" in walk_flags(walk_input),
-        start_paused=_start_paused_from_config(),
+        start_paused=start_paused,
     )
     # Named, so a thread dump says which walk it watches and a test teardown can
     # wait for every monitor still alive: the walk_ended row lands a few ms after

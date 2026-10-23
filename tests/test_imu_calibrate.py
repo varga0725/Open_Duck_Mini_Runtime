@@ -40,9 +40,10 @@ def test_calibration_worker_uses_state_imu_handle(client, monkeypatch, tmp_path)
     s = tnkr_server.imu_calib_status
     assert s["error"] is None
     assert s["calibrated"] is True
-    assert s["calibration_status"] == [3, 3, 3, 3]
-    assert s["offsets"]["offsets_accelerometer"] == [1, 2, 3]
-    assert (tmp_path / "imu_calib_data.pkl").exists()
+    assert s["calibration_status"] == [None, None, None, 3]
+    assert fake.calibration_started and fake.calibration_saved
+    assert s["offsets"] == {}
+    assert not (tmp_path / "imu_calib_data.pkl").exists()
 
 
 def test_calibration_worker_reports_error_when_imu_unavailable(client, monkeypatch):

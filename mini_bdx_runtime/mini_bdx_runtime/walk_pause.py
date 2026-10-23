@@ -37,25 +37,37 @@ PAUSE_FILE = (
 def write(paused: bool) -> None:
     """Publish the pause state. Temp + atomic rename, so a reader mid-tick sees
     either the old flag or the new one — never a half-written file."""
-    tmp = PAUSE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"timestamp": time.time(), "paused": bool(paused)}, f)
-    os.replace(tmp, PAUSE_FILE)
+    # Both the API process and the controller can publish a toggle. Each
+    # writer needs its own staging file so concurrent replaces cannot collide.
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=os.path.dirname(PAUSE_FILE) or ".",
+            prefix=".tnkr-pause-", delete=False,
+        ) as output:
+            tmp = output.name
+            json.dump({"timestamp": time.time(), "paused": bool(paused)}, output)
+        os.replace(tmp, PAUSE_FILE)
+    finally:
+        if tmp is not None and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
-def read() -> bool:
+def read(default: bool = False) -> bool:
     """Whether the walk should be frozen right now.
 
-    Missing or unreadable means not paused — the safe default is the one that
-    leaves the policy in control of a duck that's already on its feet, and it
-    makes "no file" mean the same thing as "never paused".
+    The runner passes its current state as default for a standalone launch or
+    a transient read failure; the server defaults to false outside a walk.
+
+    Missing or unreadable state uses the supplied default. Without an explicit
+    default, "no file" means "not paused", as expected by server status reads.
     """
     try:
         with open(PAUSE_FILE) as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return False
-    return bool(data.get("paused", False))
+        return bool(default)
+    return bool(data.get("paused", default))
 
 
 def clear() -> None:

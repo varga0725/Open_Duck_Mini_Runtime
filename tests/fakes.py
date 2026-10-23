@@ -71,3 +71,17 @@ class FakeBNO055:
 class FakeStateImu:
     def __init__(self):
         self.imu = FakeBNO055()
+        self.calibration_started = False
+        self.calibration_saved = False
+
+    def get_data(self):
+        return {"gyro": [0, 0, 0], "accelero": [0, 0, 9.81], "quaternion": [1, 0, 0, 0]}
+
+    def begin_calibration(self):
+        self.calibration_started = True
+
+    def calibration_status(self):
+        return 3
+
+    def save_calibration(self):
+        self.calibration_saved = True

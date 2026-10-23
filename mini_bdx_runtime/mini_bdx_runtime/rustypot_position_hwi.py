@@ -358,6 +358,36 @@ class HWI:
                 "write_goal_position",
             )
 
+    def _read_all_with_fallback(self, op):
+        """Use one sync read; malformed replies fall back to attributed single reads.
+
+        Position/velocity reads were measured at 2 ms per batch on the CH343,
+        versus 14 ms per batch with individual transactions. Writes and gains
+        deliberately retain the individual-servo path.
+        """
+        ids = list(self.joints.values())
+        try:
+            values = getattr(self.io, op)(ids)
+            if (values is None or len(values) != len(ids)
+                    or not np.isfinite(values).all()):
+                raise ValueError(f"{op} returned an incomplete or nonfinite sample")
+            return values
+        except BaseException as exc:
+            if is_rust_panic(exc):
+                self._reopen_io()
+            elif not isinstance(exc, (OSError, ValueError, TypeError)):
+                raise
+            print(f"[HWI] sync {op} failed; reading individual servos: {exc}")
+            values = [
+                self._io_retry(
+                    lambda i=servo_id: getattr(self.io, op)([i])[0], name, op
+                )
+                for name, servo_id in self.joints.items()
+            ]
+            if not np.isfinite(values).all():
+                raise ValueError(f"{op} returned nonfinite individual samples")
+            return values
+
     @_with_bus_lock
     def get_present_positions(self, ignore=[]):
         """
@@ -365,15 +395,7 @@ class HWI:
         """
 
         try:
-            # Per-servo: cdc_acm can't do a bulk sync transaction (see _write_kps).
-            present_positions = [
-                self._io_retry(
-                    lambda i=id: self.io.read_present_position([i])[0],
-                    name,
-                    "read_present_position",
-                )
-                for name, id in self.joints.items()
-            ]
+            present_positions = self._read_all_with_fallback("read_present_position")
         except Exception as e:
             print(e)
             return None
@@ -436,15 +458,7 @@ class HWI:
         Returns the present velocities in rad/s (default) or rev/min
         """
         try:
-            # Per-servo: cdc_acm can't do a bulk sync transaction (see _write_kps).
-            present_velocities = [
-                self._io_retry(
-                    lambda i=id: self.io.read_present_velocity([i])[0],
-                    name,
-                    "read_present_velocity",
-                )
-                for name, id in self.joints.items()
-            ]
+            present_velocities = self._read_all_with_fallback("read_present_velocity")
         except Exception as e:
             print(e)
             return None
