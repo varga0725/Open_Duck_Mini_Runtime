@@ -50,6 +50,7 @@ from mini_bdx_runtime.rustypot_position_hwi import (
 from mini_bdx_runtime.duck_config import DuckConfig, LEG_PAIRS
 from mini_bdx_runtime import telemetry
 from mini_bdx_runtime import walk_telemetry
+from mini_bdx_runtime import status_feed
 from mini_bdx_runtime import walk_pause
 from mini_bdx_runtime import walk_offsets
 from mini_bdx_runtime.pad import (
@@ -407,9 +408,35 @@ def _locked_stop_walk():
         stop_walk_process()
 
 
+def _status_feed_loop(path: str, stop) -> None:
+    """Publishes server-held state for external read-only monitors (see status_feed).
+    Reads globals only — no hardware, no BUS_LOCK — so it can never contend for the bus."""
+    while not stop.wait(status_feed.INTERVAL_S):
+        try:
+            walking = is_walking()
+            status = status_feed.build_status(
+                walking=walking,
+                paused=walking and bool(walk_pause.read()),
+                diagnostic=(directions_session is not None or rehome_io is not None
+                            or stance_holding or head_puppet_active),
+                walk_snapshot=walk_telemetry.read_snapshot() if walking else None,
+                cached_joints=dict(last_state_joints),
+                last_voltage=_last_voltage,
+                now_monotonic=time.monotonic(),
+            )
+            status_feed.write_status(path, status)
+        except Exception:
+            traceback.print_exc()  # a monitoring hiccup must never take the server down
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    feed_path = os.environ.get(status_feed.ENV_VAR)
+    feed_stop = _Event()
+    if feed_path:
+        Thread(target=_status_feed_loop, args=(feed_path, feed_stop), daemon=True, name="status-feed").start()
     yield
+    feed_stop.set()
     _close_rehome_io()
     release_hwi()
     # Off the event loop: stopping a SIGTERM-ignoring walk can block ~5s in
