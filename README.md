@@ -290,3 +290,19 @@ to do anyway.
 Reflashing is the only way to do this. `setup.sh --clean` deliberately keeps
 `~/.tnkr-telemetry.json`, because that file is where your opt-out lives and a
 reinstall must not quietly turn telemetry back on.
+
+## Read-only status file for external monitors
+
+Set `TNKR_STATUS_FILE` (e.g. `/run/tnkr/status.json`) and the server writes a small JSON status document
+every 0.5 s, built **only** from state it already holds. It never opens the servo bus or IMU, and never takes `BUS_LOCK`:
+
+| Field | Source |
+|---|---|
+| `mode` | `autonomous` while a walk runs, `diagnostic` during directions/rehome/stance/head-puppet sessions, else `idle` |
+| `joints` | walk loop's `/dev/shm` snapshot while walking; otherwise the last pose `/api/state` read (`sensors.joints_source = cached_last_read`) |
+| `imu` | walk loop snapshot only (null when idle) |
+| `battery` | last `/api/voltage` reading with `age_s` |
+| `timestamp` | wall-clock write time; monitors treat an old file as stale |
+
+`mini_bdx_runtime/status_feed.py` builds the document; `tests/test_status_feed.py` asserts the feed never calls `get_hwi`.
+Example systemd drop-in: `RuntimeDirectory=tnkr`, `Environment=TNKR_STATUS_FILE=/run/tnkr/status.json`.
